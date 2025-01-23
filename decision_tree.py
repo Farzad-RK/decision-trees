@@ -1,5 +1,5 @@
 import numpy as np
-from TreeNode import TreeNode
+from tree_node import TreeNode
 
 
 class DecisionTree:

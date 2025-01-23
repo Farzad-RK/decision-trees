@@ -1,7 +1,7 @@
 
 
 class TreeNode:
-    def __init__(self, decision_criterion=None, is_leaf=False,left_child=None, right_child=None):
+    def __init__(self, decision_criterion=None, is_leaf=False, left_child=None, right_child=None):
         """
         Initializes a tree node.
 
