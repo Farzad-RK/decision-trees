@@ -25,6 +25,7 @@ def visualize_dataset():
 
     # Calculate the percentage of missing values per feature
     missing_percentages = (missing_counts / len(X)) * 100
+    print(f"Missing percentages: {missing_percentages}")
 
     # Plot the percentages
     plt.figure(figsize=(10, 6))
