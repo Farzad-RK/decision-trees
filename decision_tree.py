@@ -1,5 +1,7 @@
 import numpy as np
-from tree_node import TreeNode
+from node import Node
+from sklearn.model_selection import StratifiedKFold
+from graphviz import Digraph
 
 
 class DecisionTree:
@@ -45,19 +47,19 @@ class DecisionTree:
         """
         # Check stopping criteria
         if len(np.unique(y)) == 1 or len(y) < self.min_samples_split or (self.max_depth and depth >= self.max_depth):
-            leaf = TreeNode(is_leaf=True)
+            leaf = Node(is_leaf=True)
             leaf.set_leaf(label=np.bincount(y).argmax())  # Set majority class label
             return leaf
 
         # Select the best split (decision criterion)
         best_split = self.decision_criteria(X, y)  # This should be defined externally for specific algorithms
         if best_split['impurity_decrease'] < self.min_impurity_decrease:
-            leaf = TreeNode(is_leaf=True)
+            leaf = Node(is_leaf=True)
             leaf.set_leaf(label=np.bincount(y).argmax())
             return leaf
 
         # Create an internal node
-        node = TreeNode(decision_criterion=best_split['criterion'])
+        node = Node(decision_criterion=best_split['criterion'])
 
         # Split the data
         left_indices = [i for i in range(len(X)) if best_split['criterion'](X[i])]
@@ -125,52 +127,23 @@ class DecisionTree:
         - k (int): Number of folds.
 
         Returns:
-        - float: Average 0-1 loss across all folds.
+        - float: Average 0-1 loss across all folds for training
+        - float: Average 0-1 loss across all folds for validation
         """
-        folds = self._stratified_k_fold(X, y, k)
-        losses = []
+        train_losses = []
+        test_losses = []
 
-        for train_indices, test_indices in folds:
+        skf = StratifiedKFold(n_splits=k, shuffle=True)
+        for train_indices, test_indices in skf.split(X, y):
             X_train, X_test = X[train_indices], X[test_indices]
             y_train, y_test = y[train_indices], y[test_indices]
-
             self.train(X_train, y_train)
-            loss = self.evaluate(X_test, y_test)
-            losses.append(loss)
+            # Loss calculation of the train set
+            train_losses.append(self.evaluate(X_train, y_train))
+            # Loss calculation of the test set
+            test_losses.append(self.evaluate(X_test, y_test))
 
-        return np.mean(losses)
-
-    def _stratified_k_fold(self, X, y, k):
-        """
-        Implements stratified K-fold splitting from scratch.
-
-        Parameters:
-        - X (numpy.ndarray): Feature matrix of shape (n_samples, n_features).
-        - y (numpy.ndarray): Labels of shape (n_samples,).
-        - k (int): Number of folds.
-
-        Returns:
-        - list: A list of (train_indices, test_indices) for each fold.
-        """
-        unique_classes, class_counts = np.unique(y, return_counts=True)
-        folds = [[] for _ in range(k)]
-
-        # Split indices for each class into folds
-        for cls, count in zip(unique_classes, class_counts):
-            cls_indices = np.where(y == cls)[0]
-            np.random.shuffle(cls_indices)
-            splits = np.array_split(cls_indices, k)
-
-            for fold_idx, split in enumerate(splits):
-                folds[fold_idx].extend(split)
-
-        stratified_folds = []
-        for i in range(k):
-            test_indices = np.array(folds[i])
-            train_indices = np.array([idx for fold in folds if fold is not folds[i] for idx in fold])
-            stratified_folds.append((train_indices, test_indices))
-
-        return stratified_folds
+        return np.mean(train_losses), np.mean(test_losses)
 
     def __repr__(self):
         return "DecisionTree()"

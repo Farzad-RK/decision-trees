@@ -1,7 +1,7 @@
 
 
-class TreeNode:
-    def __init__(self, decision_criterion=None, is_leaf=False, left_child=None, right_child=None):
+class Node:
+    def __init__(self, decision_criterion=None, is_leaf=False, left_child=None, right_child=None, threshold=None):
         """
         Initializes a tree node.
 
@@ -17,6 +17,7 @@ class TreeNode:
         self.left_child = left_child                        # Left child (TreeNode)
         self.right_child = right_child                       # Right child (TreeNode)
         self.label = None                             # Class label for leaf nodes
+        self.threshold = threshold
 
     def set_children(self, left_child, right_child):
         """
