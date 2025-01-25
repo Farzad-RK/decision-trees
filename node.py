@@ -1,67 +1,51 @@
 
 
 class Node:
-    def __init__(self, decision_criterion=None, is_leaf=False, left_child=None, right_child=None, threshold=None):
+    def __init__(self,
+                 is_leaf=False,
+                 label=None,
+                 decision_criterion=None,
+                 feature_idx=None,
+                 threshold=None):
         """
-        Initializes a tree node.
+        Represents a node in the decision tree.
 
-        Parameters:
-        - decision_criterion (callable): A function that takes a numpy vector (data point) as input
-          and returns a Boolean value as output. This represents the splitting criterion.
-        - is_leaf (bool): Flag to indicate if the node is a leaf.
-        - left_child (TreeNode): The left child node.
-        - right_child (TreeNode): The right child node.
+        Parameters
+        ----------
+        is_leaf : bool
+            Whether this node is a leaf.
+        label : int, optional
+            The class label if this is a leaf node.
+        decision_criterion : callable, optional
+            A function that takes a sample (1D array) and returns True/False
+            for left or right split.
+        feature_idx : int, optional
+            The feature index used for threshold comparison (if known).
+        threshold : float, optional
+            The threshold value used in the decision function (if known).
         """
-        self.decision_criterion = decision_criterion  # Function to test decision criterion
-        self.is_leaf = is_leaf                        # Whether the node is a leaf
-        self.left_child = left_child                        # Left child (TreeNode)
-        self.right_child = right_child                       # Right child (TreeNode)
-        self.label = None                             # Class label for leaf nodes
+        self.is_leaf = is_leaf
+        self.label = label
+        self.decision_criterion = decision_criterion
+        self.feature_idx = feature_idx
         self.threshold = threshold
-
-    def set_children(self, left_child, right_child):
-        """
-        Sets the left and right children of the node.
-
-        Parameters:
-        - left_child (TreeNode): The left child node.
-        - right_child (TreeNode): The right child node.
-        """
-        self.left_child = left_child
-        self.right_child = right_child
+        self.left_child = None
+        self.right_child = None
 
     def set_leaf(self, label):
-        """
-        Converts the node to a leaf and assigns a label.
-
-        Parameters:
-        - label: The class label to assign to the leaf.
-        """
         self.is_leaf = True
         self.label = label
 
+    def set_children(self, left_child, right_child):
+        self.left_child = left_child
+        self.right_child = right_child
+
     def evaluate(self, sample):
         """
-        Evaluates the decision criterion for a given sample.
-
-        Parameters:
-        - sample (numpy.ndarray): A single feature vector (data point).
-
-        Returns:
-        - bool: The result of the decision criterion (True for left, False for right).
-        """
-        if self.decision_criterion is None:
-            raise ValueError("Decision criterion is not set for this node.")
-        return self.decision_criterion(sample)
-
-    def __repr__(self):
-        """
-        String representation of the node.
-
-        Returns:
-        - str: Description of the node.
+        Evaluate the sample at this node's decision criterion.
+        (Only valid for non-leaf nodes.)
         """
         if self.is_leaf:
-            return f"Leaf Node(label={self.label})"
-        else:
-            return f"Internal Node(decision_criterion={self.decision_criterion})"
+            return None
+        return self.decision_criterion(sample)
+
