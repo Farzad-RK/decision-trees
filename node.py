@@ -1,5 +1,3 @@
-
-
 class Node:
     def __init__(self,
                  is_leaf=False,
@@ -32,6 +30,11 @@ class Node:
         self.left_child = None
         self.right_child = None
 
+        # If None, we do not perform fractional splits
+        # at this node; if a float in [0,1], that fraction
+        # of missing data goes left, and the rest goes right.
+        self.missing_left_fraction = None
+
     def set_leaf(self, label):
         self.is_leaf = True
         self.label = label
@@ -44,8 +47,11 @@ class Node:
         """
         Evaluate the sample at this node's decision criterion.
         (Only valid for non-leaf nodes.)
+
+        Returns True if the sample goes 'left', False if it goes 'right'.
+        For standard (non-missing) data, this is used directly.
         """
         if self.is_leaf:
+            # Leaf nodes do not split further, so returning None is appropriate
             return None
         return self.decision_criterion(sample)
-

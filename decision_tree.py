@@ -3,6 +3,7 @@ from graphviz import Digraph
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.model_selection import StratifiedKFold
 from node import Node
+import pandas as pd
 
 
 class DecisionTree(BaseEstimator, ClassifierMixin):
@@ -12,7 +13,8 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
             stopping_criteria=None,
             max_depth=None,
             min_samples_split=2,
-            min_impurity_decrease=0.0
+            min_impurity_decrease=0.0,
+            continuous_features_indexes=None
     ):
         """
         A flexible DecisionTree classifier that follows scikit-learn's API.
@@ -27,7 +29,6 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
               - 'impurity_decrease': float -> the impurity decrease for that split
               - 'feature_idx': int -> the feature index used in the split
               - 'threshold': float -> the numeric threshold used
-            This is unorthodox, but preserves your flexible custom splitting logic.
 
         stopping_criteria : dict or None
             Additional stopping criteria.
@@ -55,6 +56,7 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         This attribute is going to be calculated after the fit has been called
         """
         self.feature_importances_ = None
+        self.continuous_features_indexes = continuous_features_indexes
 
     def fit(self, X, y):
         """
@@ -99,9 +101,36 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
 
         return self
 
+    def _is_missing(self, val):
+        """
+        Check if a value is missing.
+        For numeric features, we treat np.nan as missing.
+        For nominal features, we treat None as missing
+        """
+        if isinstance(val, float) and np.isnan(val):
+            return True
+        if val is None:
+            return True
+        return False
+
     def _build_tree(self, X, y, depth):
         """
         Recursively builds the decision tree.
+
+        Missing-Value Handling (extension):
+        -----------------------------------
+        1. For finding the best feature (decision_criteria), we only use
+           non-missing samples for that candidate feature.
+        2. After the best feature is chosen, we do a "hard assignment" of
+           missing-feature samples to the left or right branch:
+              - We first split the non-missing samples in the usual way.
+              - We calculate the fraction of non-missing samples going left
+                vs. right.
+              - node.missing_left_fraction = (# going left / # non-missing)
+              - All missing samples go to the branch that has the majority
+                of non-missing samples (or to left if equal).
+        3. At prediction time, if the feature value is missing for that node,
+           we check node.missing_left_fraction to see where to send the sample.
         """
         # Check if this node should be a leaf:
         #  1) All labels are identical
@@ -120,8 +149,6 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         # Attempt to find the best split using the user-defined criterion
         if not self.decision_criteria:
             # Fallback: If no external decision_criteria is provided,
-            # you might provide a default (e.g., a Gini/Entropy-based approach).
-            # For demonstration, we'll raise an error.
             raise ValueError(
                 "No decision_criteria function provided. "
                 "Please provide a callable for splitting logic."
@@ -142,21 +169,50 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
             threshold=best_split.get('threshold', None)
         )
 
-        # Split the data into left and right branches
+        # Split the data into left and right branches for non-missing values
+        feature_idx = node.feature_idx
         left_indices = []
         right_indices = []
+        missing_indices = []
+
         for i, row in enumerate(X):
-            if best_split['criterion'](row):
-                left_indices.append(i)
+            # Check if the chosen feature is missing
+            if self._is_missing(row[feature_idx]):
+                missing_indices.append(i)
             else:
-                right_indices.append(i)
+                # Normal splitting
+                if best_split['criterion'](row):
+                    left_indices.append(i)
+                else:
+                    right_indices.append(i)
 
         left_indices = np.array(left_indices, dtype=int)
         right_indices = np.array(right_indices, dtype=int)
+        missing_indices = np.array(missing_indices, dtype=int)
+
+        # Distribute missing data in a "hard assignment" fashion
+        # based on the proportion of non-missing samples that go left/right
+        num_left = len(left_indices)
+        num_right = len(right_indices)
+        total_nonmissing = num_left + num_right
+
+        if total_nonmissing == 0:
+            # Edge case: if *all* samples are missing for this feature,
+            # just send them all left by default and set fraction = 1.0
+            node.missing_left_fraction = 1.0
+            left_indices = np.concatenate([left_indices, missing_indices])
+            missing_indices = []
+        else:
+            left_fraction = num_left / total_nonmissing
+            node.missing_left_fraction = left_fraction
+            # Decide where missing samples go:
+            if left_fraction >= 0.5:
+                left_indices = np.concatenate([left_indices, missing_indices])
+            else:
+                right_indices = np.concatenate([right_indices, missing_indices])
 
         X_left, y_left = X[left_indices], y[left_indices]
         X_right, y_right = X[right_indices], y[right_indices]
-
 
         # Recursively build left and right subtrees
         node.set_children(
@@ -180,15 +236,33 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
     def _predict_sample(self, sample, node):
         """
         Traverse the tree for a single sample.
+
+        Extended to handle missing values:
+          - If the node is non-leaf and the sample's feature is missing,
+            we check node.missing_left_fraction:
+               * If it's >= 0.5, predict down the left child
+               * Else, go right child
         """
         if node.is_leaf:
             return node.label
-        # Evaluate at the current node and go left or right
-        decision = node.evaluate(sample)
-        if decision:  # True means go left
-            return self._predict_sample(sample, node.left_child)
+
+        # If the feature is missing, direct the sample based on missing_left_fraction
+        if self._is_missing(sample[node.feature_idx]):
+            if node.missing_left_fraction is None:
+                # If for any reason it's not set, default to left or handle gracefully
+                return self._predict_sample(sample, node.left_child)
+            else:
+                if node.missing_left_fraction >= 0.5:
+                    return self._predict_sample(sample, node.left_child)
+                else:
+                    return self._predict_sample(sample, node.right_child)
         else:
-            return self._predict_sample(sample, node.right_child)
+            # Evaluate at the current node and go left or right
+            decision = node.evaluate(sample)
+            if decision:  # True means go left
+                return self._predict_sample(sample, node.left_child)
+            else:
+                return self._predict_sample(sample, node.right_child)
 
     def score(self, X, y):
         """
@@ -199,25 +273,7 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         y_pred = self.predict(X)
         return np.mean(y_pred == y)
 
-    # ----------------------------------------------------------------
-    # Stratified Cross-validation
-    # ----------------------------------------------------------------
-    def cross_validate(self, X, y, kfolds):
-        """
-        (Optional) Stratified K-Fold cross-validation.
-        Not strictly required since scikit-learn has cross_val_score.
-        """
-
-        skf = StratifiedKFold(n_splits=kfolds, shuffle=True)
-        scores = []
-        for train_idx, test_idx in skf.split(X, y):
-            X_train, X_test = X[train_idx], X[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
-            self.fit(X_train, y_train)
-            scores.append(self.score(X_test, y_test))
-        return np.mean(scores)
-
-    def visualize_tree(self, feature_names=None, file_name='decision_tree.png'):
+    def visualize_tree(self, feature_names=None, file_name='decision_tree'):
         """
         Visualizes the decision tree using graphviz.
 
@@ -232,11 +288,10 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         -------
         dot : graphviz.Digraph
             The graphviz Digraph object representing the tree.
-            You can render it (dot.render(...)) or display in Jupyter (dot)
         """
         dot = Digraph()
         self._add_node(dot, self.root, node_id="0", feature_names=feature_names)
-        dot.render(f"./{file_name}.png", format="png")
+        dot.render(f"./{file_name}", format="png")
 
     def _add_node(self, dot, node, node_id, feature_names=None):
         """
@@ -278,6 +333,7 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         Return estimator parameters for this DecisionTree (used by scikit-learn).
         """
         return {
+            "continuous_features_indexes": self.continuous_features_indexes,
             "stopping_criteria": self.stopping_criteria,
             "max_depth": self.max_depth,
             "min_samples_split": self.min_samples_split,
