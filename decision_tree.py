@@ -14,7 +14,6 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
             max_depth=None,
             min_samples_split=2,
             min_impurity_decrease=0.0,
-            continuous_features_indexes=None
     ):
         """
         A flexible DecisionTree classifier that follows scikit-learn's API.
@@ -56,7 +55,6 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         This attribute is going to be calculated after the fit has been called
         """
         self.feature_importances_ = None
-        self.continuous_features_indexes = continuous_features_indexes
 
     def fit(self, X, y):
         """
@@ -89,7 +87,7 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         self._feature_importance_tracker = np.zeros(X.shape[1], dtype=float)
 
         # Build the tree recursively
-        self.root = self._build_tree(X, y, depth=0)
+        self.root = self._build_tree(X, y, depth=0, parent_label=None)
 
         # after building, normalize importance
         total = self._feature_importance_tracker.sum()
@@ -113,7 +111,7 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
             return True
         return False
 
-    def _build_tree(self, X, y, depth):
+    def _build_tree(self, X, y, depth, parent_label=None):
         """
         Recursively builds the decision tree.
 
@@ -131,56 +129,61 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
                 of non-missing samples (or to left if equal).
         3. At prediction time, if the feature value is missing for that node,
            we check node.missing_left_fraction to see where to send the sample.
+
+        Note: we also accept 'parent_label' to handle empty y by using the parent's majority label.
         """
-        # Check if this node should be a leaf:
-        #  1) All labels are identical
-        #  2) Not enough samples to split
-        #  3) Max depth reached
+        # If there are no samples in y, directly create a leaf with the parent's label
+        if len(y) == 0:
+            leaf = Node(is_leaf=True)
+            # Fallback: if parent_label is None, default to 0 or any fixed class
+            fallback_label = parent_label if parent_label is not None else 0
+            leaf.set_leaf(label=fallback_label)
+            return leaf
+
         unique_labels = np.unique(y)
+
+        # Leaf condition checks:
         if (
                 len(unique_labels) == 1
                 or len(y) < self.min_samples_split
                 or (self.max_depth is not None and depth >= self.max_depth)
         ):
             leaf = Node(is_leaf=True)
-            leaf.set_leaf(label=np.bincount(y).argmax())  # majority class
+            # Normal leaf: pick majority from this node's subset
+            majority_label = np.bincount(y).argmax()
+            leaf.set_leaf(label=majority_label)
             return leaf
 
-        # Attempt to find the best split using the user-defined criterion
+        # Attempt to find best split
         if not self.decision_criteria:
-            # Fallback: If no external decision_criteria is provided,
-            raise ValueError(
-                "No decision_criteria function provided. "
-                "Please provide a callable for splitting logic."
-            )
+            raise ValueError("No decision_criteria function provided.")
 
         best_split = self.decision_criteria(X, y)
         if best_split['impurity_decrease'] < self.min_impurity_decrease:
-            # Not enough impurity decrease, convert to leaf
+            # Convert to leaf
             leaf = Node(is_leaf=True)
-            leaf.set_leaf(label=np.bincount(y).argmax())
+            majority_label = np.bincount(y).argmax()
+            leaf.set_leaf(label=majority_label)
             return leaf
 
         # Create internal node
         node = Node(
             is_leaf=False,
-            decision_criterion=best_split['criterion'],  # the lambda that does x[feature_idx] < threshold
+            decision_criterion=best_split['criterion'],
             feature_idx=best_split.get('feature_idx', None),
             threshold=best_split.get('threshold', None)
         )
 
-        # Split the data into left and right branches for non-missing values
+        # Split data into left / right / missing
         feature_idx = node.feature_idx
         left_indices = []
         right_indices = []
         missing_indices = []
 
         for i, row in enumerate(X):
-            # Check if the chosen feature is missing
             if self._is_missing(row[feature_idx]):
                 missing_indices.append(i)
             else:
-                # Normal splitting
                 if best_split['criterion'](row):
                     left_indices.append(i)
                 else:
@@ -190,22 +193,17 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         right_indices = np.array(right_indices, dtype=int)
         missing_indices = np.array(missing_indices, dtype=int)
 
-        # Distribute missing data in a "hard assignment" fashion
-        # based on the proportion of non-missing samples that go left/right
         num_left = len(left_indices)
         num_right = len(right_indices)
         total_nonmissing = num_left + num_right
 
         if total_nonmissing == 0:
-            # Edge case: if *all* samples are missing for this feature,
-            # just send them all left by default and set fraction = 1.0
             node.missing_left_fraction = 1.0
             left_indices = np.concatenate([left_indices, missing_indices])
             missing_indices = []
         else:
             left_fraction = num_left / total_nonmissing
             node.missing_left_fraction = left_fraction
-            # Decide where missing samples go:
             if left_fraction >= 0.5:
                 left_indices = np.concatenate([left_indices, missing_indices])
             else:
@@ -214,13 +212,15 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         X_left, y_left = X[left_indices], y[left_indices]
         X_right, y_right = X[right_indices], y[right_indices]
 
-        # Recursively build left and right subtrees
-        node.set_children(
-            self._build_tree(X_left, y_left, depth + 1),
-            self._build_tree(X_right, y_right, depth + 1)
-        )
+        # Recursively build subtrees
+        # The 'majority_label' for these children is the current node's majority if it were to become a leaf
+        # so we pass that as 'parent_label' in case the child's y is empty.
+        node_majority = np.bincount(y).argmax()
+        left_child = self._build_tree(X_left, y_left, depth + 1, parent_label=node_majority)
+        right_child = self._build_tree(X_right, y_right, depth + 1, parent_label=node_majority)
+        node.set_children(left_child, right_child)
 
-        # Updating feature tracker to accumulate the feature score
+        # Track feature importance
         node_gain = best_split['impurity_decrease']
         node_feature = best_split['feature_idx']
         self._feature_importance_tracker[node_feature] += node_gain
@@ -272,6 +272,85 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         """
         y_pred = self.predict(X)
         return np.mean(y_pred == y)
+
+    def prune_tree(self, X, y):
+        """
+        Post-construction pruning:
+          - If both children of a node are leaves with the same label, collapse into a single leaf.
+          - Optionally, you can add a check for misclassification improvement.
+            (e.g., does the split reduce the node's error enough to justify itself?)
+
+        Parameters
+        ----------
+        X : np.ndarray
+            The training features (used to evaluate the node's misclassification if needed).
+        y : np.ndarray
+            The training labels.
+        """
+
+        def _prune_node(node, X_node, y_node):
+            # If node is a leaf, nothing to prune
+            if node.is_leaf:
+                return
+
+            # Split data to left/right subsets according to node criterion (and missing logic)
+            left_indices, right_indices = [], []
+            for i, row in enumerate(X_node):
+                if self._is_missing(row[node.feature_idx]):
+                    # Decide based on missing_left_fraction
+                    if node.missing_left_fraction is None or node.missing_left_fraction >= 0.5:
+                        left_indices.append(i)
+                    else:
+                        right_indices.append(i)
+                else:
+                    if node.decision_criterion(row):
+                        left_indices.append(i)
+                    else:
+                        right_indices.append(i)
+
+            left_indices = np.array(left_indices, dtype=int)
+            right_indices = np.array(right_indices, dtype=int)
+
+            X_left, y_left = X_node[left_indices], y_node[left_indices]
+            X_right, y_right = X_node[right_indices], y_node[right_indices]
+
+            # Recursively prune children first (post-order)
+            _prune_node(node.left_child, X_left, y_left)
+            _prune_node(node.right_child, X_right, y_right)
+
+            # After children are pruned, see if children are both leaves and use a simple rule to prune
+            left_child, right_child = node.left_child, node.right_child
+
+            if left_child.is_leaf and right_child.is_leaf:
+                # 1) If they have the same label, we can merge them
+                if left_child.label == right_child.label:
+                    # Convert this node into a leaf
+                    node.set_leaf(left_child.label)
+                    node.left_child = None
+                    node.right_child = None
+                    return
+
+                # 2) Optional: check misclassification
+                #    For example, see if the error of splitting is not better than if it were a single leaf.
+                #    Node's majority class
+                node_majority = np.bincount(y_node).argmax()
+                #    Error if we keep the split
+                left_error = np.sum(y_left != left_child.label)
+                right_error = np.sum(y_right != right_child.label)
+                split_error = left_error + right_error
+                #    Error if we convert to single leaf with node_majority
+                leaf_error = np.sum(y_node != node_majority)
+
+                if leaf_error <= split_error:
+                    # Prune
+                    node.set_leaf(node_majority)
+                    node.left_child = None
+                    node.right_child = None
+                    return
+
+        # Call the recursive function starting from the root
+        _prune_node(self.root, X, y)
+
 
     def visualize_tree(self, feature_names=None, file_name='decision_tree'):
         """
@@ -333,7 +412,6 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         Return estimator parameters for this DecisionTree (used by scikit-learn).
         """
         return {
-            "continuous_features_indexes": self.continuous_features_indexes,
             "stopping_criteria": self.stopping_criteria,
             "max_depth": self.max_depth,
             "min_samples_split": self.min_samples_split,

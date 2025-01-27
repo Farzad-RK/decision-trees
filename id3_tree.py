@@ -346,6 +346,27 @@ def gini_nominal(X_col, y, parent_gini):
     return best_gain, best_value
 
 
+def check_feature_vector_is_categorical(arr):
+    """
+    Checks whether a NumPy array contains any string values, which would
+    indicate that the feature vector is categorical (since categorical features
+    are typically represented as strings in this case).
+
+    Parameters:
+    -----------
+    arr : numpy.ndarray
+        A NumPy array with dtype 'object', where elements can be either float or string.
+
+    Returns:
+    --------
+    bool
+        True if any string is found in the array (indicating categorical data),
+        False otherwise.
+    """
+    contains_string = np.any(np.vectorize(lambda x: isinstance(x, str) and x != np.nan)(arr))
+    return contains_string
+
+
 class ID3(DecisionTree):
     """
     ID3 algorithm with:
@@ -365,7 +386,6 @@ class ID3(DecisionTree):
         max_depth=None,
         min_samples_split=2,
         min_impurity_decrease=0.0,
-        continuous_features_indexes=None,
         criterion="information_gain",    # "information_gain" | "gain_ratio" | "gini"
         missing_penalty_power=1.0        # exponent for penalizing fraction of non-missing
     ):
@@ -382,8 +402,6 @@ class ID3(DecisionTree):
             Minimum samples required to split a node.
         min_impurity_decrease : float, optional
             Minimum info gain (or gini decrease) needed to allow a split.
-        continuous_features_indexes : list of int, optional
-            Indices of features that are continuous; others treated as nominal.
         criterion : str
             "information_gain", "gain_ratio", or "gini" to control the splitting measure.
         missing_penalty_power : float
@@ -399,9 +417,6 @@ class ID3(DecisionTree):
             min_samples_split=min_samples_split,
             min_impurity_decrease=min_impurity_decrease
         )
-        if continuous_features_indexes is None:
-            continuous_features_indexes = []
-        self.continuous_features_indexes = continuous_features_indexes
         self.criterion = criterion
         self.missing_penalty_power = missing_penalty_power
 
@@ -421,7 +436,7 @@ class ID3(DecisionTree):
                              else np.array([val is not None for val in X_col])
         fraction_nonmissing = np.sum(not_missing_mask) / len(X_col)
 
-        if feature_index in self.continuous_features_indexes:
+        if not check_feature_vector_is_categorical(X_col):
             # Continuous
             if self.criterion == "information_gain":
                 parent_entropy = calculate_entropy(y)
@@ -489,37 +504,39 @@ class ID3(DecisionTree):
             # fraction of non-missing
             not_missing_mask = ~pd.isna(feature_values)
             fraction_nonmissing = np.sum(not_missing_mask) / n_samples
+            if fraction_nonmissing == 0:
+                continue
+            else:
+                # 1) Compute unpenalized gain (IG, ratio, or gini decrease)
+                raw_gain, threshold_or_value = self._compute_gain(
+                    feature_values, y, feature_index
+                )
 
-            # 1) Compute unpenalized gain (IG, ratio, or gini decrease)
-            raw_gain, threshold_or_value = self._compute_gain(
-                feature_values, y, feature_index
-            )
+                # 2) Apply penalty: multiply by fraction_nonmissing^missing_penalty_power
+                penalized_gain = raw_gain * (fraction_nonmissing ** self.missing_penalty_power)
 
-            # 2) Apply penalty: multiply by fraction_nonmissing^missing_penalty_power
-            penalized_gain = raw_gain * (fraction_nonmissing ** self.missing_penalty_power)
+                # 3) Track the best
+                if penalized_gain > best_gain:
+                    best_gain = penalized_gain
+                    best_feature = feature_index
+                    best_threshold = threshold_or_value
 
-            # 3) Track the best
-            if penalized_gain > best_gain:
-                best_gain = penalized_gain
-                best_feature = feature_index
-                best_threshold = threshold_or_value
-
-                # For continuous
-                if feature_index in self.continuous_features_indexes:
-                    if threshold_or_value is not None:
-                        best_criterion = lambda row, thr=threshold_or_value, f=feature_index: (
-                            (not self._is_missing(row[f])) and (row[f] <= thr)
-                        )
+                    # For continuous
+                    if not check_feature_vector_is_categorical(feature_values):
+                        if threshold_or_value is not None:
+                            best_criterion = lambda row, thr=threshold_or_value, f=feature_index: (
+                                (not self._is_missing(row[f])) and (row[f] <= thr)
+                            )
+                        else:
+                            best_criterion = None
                     else:
-                        best_criterion = None
-                else:
-                    # Nominal
-                    if threshold_or_value is not None:
-                        best_criterion = lambda row, val=threshold_or_value, f=feature_index: (
-                            (not self._is_missing(row[f])) and (row[f] == val)
-                        )
-                    else:
-                        best_criterion = None
+                        # Nominal
+                        if threshold_or_value is not None:
+                            best_criterion = lambda row, val=threshold_or_value, f=feature_index: (
+                                (not self._is_missing(row[f])) and (row[f] == val)
+                            )
+                        else:
+                            best_criterion = None
 
         # Return dictionary in the format expected by the base DecisionTree
         return {
