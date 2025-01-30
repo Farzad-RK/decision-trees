@@ -1,9 +1,7 @@
 import numpy as np
 from graphviz import Digraph
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.model_selection import StratifiedKFold
 from node import Node
-import pandas as pd
 
 
 class DecisionTree(BaseEstimator, ClassifierMixin):
@@ -273,84 +271,225 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         y_pred = self.predict(X)
         return np.mean(y_pred == y)
 
-    def prune_tree(self, X, y):
+    def cost_complexity_prune(self, X, y, alpha=0.0):
         """
-        Post-construction pruning:
-          - If both children of a node are leaves with the same label, collapse into a single leaf.
-          - Optionally, you can add a check for misclassification improvement.
-            (e.g., does the split reduce the node's error enough to justify itself?)
+        Perform a single or iterative cost-complexity pruning with parameter alpha.
+
+        - If alpha=0, we effectively remove any splits that don't reduce training error.
+        - If alpha>0, we trade off error vs. tree size.
+
+        This is a simplified version of CART's approach.
+        Typically, we'd do a sequence of prunes and pick the best by validation,
+        but here we just do repeated pruning while beneficial.
 
         Parameters
         ----------
         X : np.ndarray
-            The training features (used to evaluate the node's misclassification if needed).
+            Training features or a separate pruning set.
         y : np.ndarray
-            The training labels.
+            Labels (same length as X).
+        alpha : float
+            The complexity penalty. Higher alpha means heavier penalty on # leaves.
+
+        Returns
+        -------
+        None (the tree is pruned in-place).
         """
 
-        def _prune_node(node, X_node, y_node):
-            # If node is a leaf, nothing to prune
+        # We'll define some helpers inside.
+
+        def _postorder_nodes(node):
+            """Return a list of internal nodes in post-order (children before parent)."""
+            nodes = []
+            if node is None or node.is_leaf:
+                return nodes
+            # Recur left
+            if node.left_child is not None:
+                nodes.extend(_postorder_nodes(node.left_child))
+            # Recur right
+            if node.right_child is not None:
+                nodes.extend(_postorder_nodes(node.right_child))
+            # Then add this node
+            nodes.append(node)
+            return nodes
+
+        def _count_leaves(node):
+            """Count how many leaf nodes are in this subtree."""
             if node.is_leaf:
-                return
+                return 1
+            return _count_leaves(node.left_child) + _count_leaves(node.right_child)
 
-            # Split data to left/right subsets according to node criterion (and missing logic)
-            left_indices, right_indices = [], []
-            for i, row in enumerate(X_node):
-                if self._is_missing(row[node.feature_idx]):
-                    # Decide based on missing_left_fraction
-                    if node.missing_left_fraction is None or node.missing_left_fraction >= 0.5:
-                        left_indices.append(i)
+        def _compute_subtree_error(node, X_sub, y_sub):
+            """Number of misclassifications for all samples (X_sub, y_sub) in this subtree."""
+            if len(y_sub) == 0:
+                # no samples => no immediate error
+                return 0
+            preds = []
+            for i in range(len(y_sub)):
+                preds.append(self._predict_sample(X_sub[i], node))
+            preds = np.array(preds)
+            return np.sum(preds != y_sub)
+
+        def _gather_samples_for_subtree(node, X_sub, y_sub):
+            """
+            Return the subset of (X_sub, y_sub) that fall under the subtree rooted at 'node'.
+            We do a BFS or DFS from 'node' -> but it's easier to just check which samples predict
+            to a leaf in that subtree. Then we keep them.
+            """
+            # One approach:
+            # We can reuse predict logic, but we want to see which end node is under "node".
+            # We'll do an index-based approach: if the path from the root includes 'node' as an ancestor,
+            # we skip or keep. This can be complicated.
+            # Simpler approach is to see which samples would be predicted
+            # if we replaced the entire root with 'node'.
+            # But that breaks the overall tree structure.
+            #
+            # Alternatively, if we have a function that classifies from 'node' downward (like _predict_sample but starting here),
+            # then any sample that calls node or its children is "in" this subtree.
+            # But from a whole-tree perspective, some samples might not reach 'node' unless we do partial checks.
+            #
+            # EASIEST: We want the training examples that definitely belong to the subtree "node" in the normal tree structure.
+            # We can trace from the root down.
+            # => We'll define a helper that from the root, for each sample, we track the path of nodes.
+            # If it includes 'node', we add that sample to the set.
+            #
+            # For large data, this might be slow, but it's simpler logically.
+
+            included_indices = []
+            for i, row in enumerate(X_sub):
+                # follow normal predict path, collecting visited nodes
+                current = self.root
+                visited = []
+                while not current.is_leaf:
+                    visited.append(current)
+                    if self._is_missing(row[current.feature_idx]):
+                        # go left or right based on missing_left_fraction
+                        if current.missing_left_fraction is None or current.missing_left_fraction >= 0.5:
+                            current = current.left_child
+                        else:
+                            current = current.right_child
                     else:
-                        right_indices.append(i)
+                        decision = current.evaluate(row)
+                        if decision:
+                            current = current.left_child
+                        else:
+                            current = current.right_child
+                    if current is None:
+                        break
+                # Also add the final leaf
+                if current is not None:
+                    visited.append(current)
+
+                if node in visited:
+                    included_indices.append(i)
+
+            included_indices = np.array(included_indices, dtype=int)
+            return X_sub[included_indices], y_sub[included_indices]
+
+        def _prune_node(node, majority_label):
+            """
+            Turn 'node' into a leaf with the given majority_label.
+            """
+            node.is_leaf = True
+            node.label = majority_label
+            node.left_child = None
+            node.right_child = None
+            node.decision_criterion = None
+            node.feature_idx = None
+            node.threshold = None
+            node.missing_left_fraction = None
+
+        # Now we do repeated "weakest link" pruning until no improvement or tree collapses
+        while True:
+            nodes = _postorder_nodes(self.root)
+            if not nodes:
+                break  # no internal nodes left to prune
+
+            best_node = None
+            best_alpha_gain = float('inf')  # the smallest alpha = deltaR / deltaLeaves
+            best_deltaR = 0
+            best_deltaLeaves = 1
+            best_majority_label = 0
+
+            # We'll track the entire R(T) for the root first
+            full_error = _compute_subtree_error(self.root, X, y)
+            full_leaf_count = _count_leaves(self.root)
+
+            for node in nodes:
+                # Subtree T_node
+                X_subtree, y_subtree = _gather_samples_for_subtree(node, X, y)
+                # current subtree's error
+                unpruned_error = _compute_subtree_error(node, X_subtree, y_subtree)
+                subtree_leaves = _count_leaves(node)
+
+                # If we prune this node into a leaf, what's the new error for that subtree?
+                # The leaf's label would typically be the majority of y_subtree (if it's not empty)
+                if len(y_subtree) > 0:
+                    pruned_label = np.bincount(y_subtree).argmax()
                 else:
-                    if node.decision_criterion(row):
-                        left_indices.append(i)
-                    else:
-                        right_indices.append(i)
+                    # fallback to node.label or 0
+                    pruned_label = node.label if node.label is not None else 0
 
-            left_indices = np.array(left_indices, dtype=int)
-            right_indices = np.array(right_indices, dtype=int)
+                # If we prune, the subtree has 1 leaf => pruned_error
+                pruned_error = np.sum(y_subtree != pruned_label)
 
-            X_left, y_left = X_node[left_indices], y_node[left_indices]
-            X_right, y_right = X_node[right_indices], y_node[right_indices]
+                # delta R = (unpruned_error -> pruned_error)
+                # But we want the difference in error for the *whole tree*, not just the subtree,
+                # so let's define that carefully:
+                #   old tree error portion = unpruned_error
+                #   new tree error portion = pruned_error
+                # deltaR_subtree = pruned_error - unpruned_error
+                #
+                # For cost complexity, we often do node-based increments, but let's do the local difference:
+                delta_error = (pruned_error - unpruned_error)
 
-            # Recursively prune children first (post-order)
-            _prune_node(node.left_child, X_left, y_left)
-            _prune_node(node.right_child, X_right, y_right)
+                # Leaves difference: subtree_leaves -> 1
+                delta_leaves = subtree_leaves - 1
 
-            # After children are pruned, see if children are both leaves and use a simple rule to prune
-            left_child, right_child = node.left_child, node.right_child
+                # local alpha
+                # alpha_node = (R_unpruned - R_pruned) / (L_pruned_removed)
+                # but we have to be consistent with sign:
+                # Actually we want the cost difference if we prune:
+                # cost(T_pruned) - cost(T_unpruned) = delta_error + alpha*(1 - subtree_leaves)
+                # => alpha_node = delta_error / delta_leaves  (since delta_leaves < 0 if subtree_leaves>1)
+                # but typically we consider positive alpha => we take absolute ratio
+                # We'll handle the typical formula: alpha_node = (unpruned_error - pruned_error) / (subtree_leaves - 1),
+                # which is how CART finds "weakest link".
+                #
+                # We want alpha_node >= 0. If pruned_error > unpruned_error => alpha_node < 0 => not beneficial
+                # so skip if it doesn't reduce error. We'll still compute to see if it's minimal positive though.
 
-            if left_child.is_leaf and right_child.is_leaf:
-                # 1) If they have the same label, we can merge them
-                if left_child.label == right_child.label:
-                    # Convert this node into a leaf
-                    node.set_leaf(left_child.label)
-                    node.left_child = None
-                    node.right_child = None
-                    return
+                # The "gain" from pruning is (unpruned_error - pruned_error).
+                gain_in_error = unpruned_error - pruned_error  # how much error we reduce
+                if delta_leaves == 0:  # edge case: subtree leaves = 1 => can't prune further
+                    continue
 
-                # 2) Optional: check misclassification
-                #    For example, see if the error of splitting is not better than if it were a single leaf.
-                #    Node's majority class
-                node_majority = np.bincount(y_node).argmax()
-                #    Error if we keep the split
-                left_error = np.sum(y_left != left_child.label)
-                right_error = np.sum(y_right != right_child.label)
-                split_error = left_error + right_error
-                #    Error if we convert to single leaf with node_majority
-                leaf_error = np.sum(y_node != node_majority)
+                alpha_node = gain_in_error / delta_leaves  # might be negative if it hurts accuracy
 
-                if leaf_error <= split_error:
-                    # Prune
-                    node.set_leaf(node_majority)
-                    node.left_child = None
-                    node.right_child = None
-                    return
+                # We'll pick the "weakest link" => smallest alpha_node
+                # but only if alpha_node >= 0. If alpha_node < 0 => pruning actually increases error, skip it.
+                if alpha_node < 0:
+                    continue
 
-        # Call the recursive function starting from the root
-        _prune_node(self.root, X, y)
+                # We compare alpha_node to alpha because we want to prune nodes that have alpha_node <= alpha
+                # i.e. it's cheap to prune them. Among those, pick the smallest alpha_node as the "weakest link".
+                if alpha_node <= alpha and alpha_node < best_alpha_gain:
+                    print(alpha_node)
+                    best_alpha_gain = alpha_node
+                    best_node = node
+                    best_deltaR = gain_in_error
+                    best_deltaLeaves = delta_leaves
+                    best_majority_label = pruned_label
 
+            # If we didn't find any node to prune for alpha, we break
+            if best_node is None:
+                break
+
+            # Otherwise, prune that node
+            _prune_node(best_node, best_majority_label)
+
+        # End while
+        # Now the tree is pruned in place
 
     def visualize_tree(self, feature_names=None, file_name='decision_tree'):
         """
