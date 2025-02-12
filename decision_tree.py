@@ -2,6 +2,7 @@ import numpy as np
 from graphviz import Digraph
 from sklearn.base import BaseEstimator, ClassifierMixin
 from node import Node
+import os
 
 
 class DecisionTree(BaseEstimator, ClassifierMixin):
@@ -53,6 +54,7 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         This attribute is going to be calculated after the fit has been called
         """
         self.feature_importances_ = None
+        self.classes_ = None
 
     def fit(self, X, y):
         """
@@ -70,6 +72,9 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         self : object
             Fitted estimator
         """
+        # Store unique classes in self.classes_. This is the key fix:
+        self.classes_, y = np.unique(y, return_inverse=True)
+
         # If stopping_criteria was provided, override any parameters
         if self.stopping_criteria is not None:
             self.max_depth = self.stopping_criteria.get('max_depth', self.max_depth)
@@ -474,7 +479,6 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
                 # We compare alpha_node to alpha because we want to prune nodes that have alpha_node <= alpha
                 # i.e. it's cheap to prune them. Among those, pick the smallest alpha_node as the "weakest link".
                 if alpha_node <= alpha and alpha_node < best_alpha_gain:
-                    print(alpha_node)
                     best_alpha_gain = alpha_node
                     best_node = node
                     best_deltaR = gain_in_error
@@ -509,7 +513,14 @@ class DecisionTree(BaseEstimator, ClassifierMixin):
         """
         dot = Digraph()
         self._add_node(dot, self.root, node_id="0", feature_names=feature_names)
-        dot.render(f"./{file_name}", format="png")
+        # Temporary file path for Graphviz rendering
+        temp_file = f"./{file_name}"
+
+        # Render to PNG
+        dot.render(temp_file, format="png")
+
+        # Remove the intermediate `.dot` file
+        os.remove(temp_file)
 
     def _add_node(self, dot, node, node_id, feature_names=None):
         """
